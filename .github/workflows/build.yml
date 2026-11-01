@@ -1,0 +1,76 @@
+name: Build Fetchly APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'project.zip'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: |
+          rm -rf src && mkdir -p src
+          unzip -q project.zip -d src
+          ROOT=$(find src -maxdepth 3 -name settings.gradle.kts -printf '%h\n' | head -n 1)
+          echo "Project folder: $ROOT"
+          echo "PROJECT_DIR=$ROOT" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Download fonts (best effort)
+        run: |
+          mkdir -p "$PROJECT_DIR/app/src/main/assets/fonts"
+          cd "$PROJECT_DIR/app/src/main/assets/fonts"
+          for f in borel/Borel-Regular kalam/Kalam-Regular kalam/Kalam-Bold pacifico/Pacifico-Regular galada/Galada-Regular lateef/Lateef-Regular amaticsc/AmaticSC-Regular; do
+            curl -fsSL -o "$(basename "$f").ttf" "https://github.com/google/fonts/raw/main/ofl/$f.ttf" || echo "Font $f not downloaded (system font will be used)"
+          done
+          ls -la
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set +e
+          gradle assembleDebug --stacktrace --no-daemon 2>&1 | tee build-log.txt
+          STATUS=${PIPESTATUS[0]}
+          echo "BUILD_STATUS=$STATUS" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Error summary (copy this and send to Claude)
+        if: env.BUILD_STATUS != '0'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo '### Build failed. Copy the lines below and send them to Claude.'
+            echo '```'
+            grep -E "^e: |error:|FAILED|What went wrong|Could not resolve|Execution failed|Unresolved reference" -A3 build-log.txt | head -n 90
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Upload APK
+        if: env.BUILD_STATUS == '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fetchly-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.PROJECT_DIR }}/build-log.txt
+          if-no-files-found: ignore
